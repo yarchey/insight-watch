@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Generate INSIGHT for Complicated via a free-tier-compatible Gemini model."""
+"""Generate and archive a Complicated-compatible INSIGHT using Gemini."""
 import datetime as dt
 import json
 import os
 from pathlib import Path
+import random
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,49 +17,53 @@ LATEST = ROOT / 'latest.json'
 ARCHIVE = ROOT / 'archive'
 API = 'https://generativelanguage.googleapis.com/v1beta'
 REQUIRED = ('title', 'line1', 'line2', 'paradox', 'evidence', 'application', 'experiment', 'topic')
+PREFERRED = ('gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash-lite')
 
 
 def api_request(path, key, payload=None):
-    url = API + path
     headers = {'x-goog-api-key': key, 'Accept': 'application/json'}
     data = None
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         headers['Content-Type'] = 'application/json'
-    req = urllib.request.Request(url, data=data, headers=headers, method='POST' if data is not None else 'GET')
+    request = urllib.request.Request(API + path, data=data, headers=headers,
+                                     method='POST' if data is not None else 'GET')
     try:
-        with urllib.request.urlopen(req, timeout=90) as response:
+        with urllib.request.urlopen(request, timeout=90) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
-        details = exc.read().decode('utf-8', errors='replace')[:1800]
+        details = exc.read().decode('utf-8', errors='replace')[:1500]
         raise RuntimeError(f'Gemini API HTTP {exc.code}: {details}') from exc
 
 
-def choose_model(key):
-    configured = os.getenv('GEMINI_MODEL', '').strip()
-    models = []
-    page_token = None
+def available_models(key):
+    models, token = {}, None
     while True:
         suffix = '?pageSize=100'
-        if page_token:
-            suffix += '&pageToken=' + urllib.parse.quote(page_token, safe='')
-        response = api_request('/models' + suffix, key)
-        models.extend(m for m in response.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', []))
-        page_token = response.get('nextPageToken')
-        if not page_token:
-            break
-    available = {m['name'].split('/')[-1]: m['name'] for m in models}
+        if token:
+            suffix += '&pageToken=' + urllib.parse.quote(token, safe='')
+        page = api_request('/models' + suffix, key)
+        for model in page.get('models', []):
+            if 'generateContent' in model.get('supportedGenerationMethods', []):
+                models[model['name'].split('/')[-1]] = model['name']
+        token = page.get('nextPageToken')
+        if not token:
+            return models
+
+
+def model_candidates(key):
+    configured = os.getenv('GEMINI_MODEL', '').strip().split('/')[-1]
+    models = available_models(key)
     if configured:
-        name = configured.split('/')[-1]
-        if name not in available:
-            raise RuntimeError(f'GEMINI_MODEL={configured} unavailable. Available: {", ".join(sorted(available))}')
-        return available[name]
-    # Prefer fast, lower-cost models. Availability is checked for this specific key.
-    preferences = ('gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-3-flash-preview')
-    for name in preferences:
-        if name in available:
-            return available[name]
-    raise RuntimeError('No preferred Gemini model found. Available generateContent models: ' + ', '.join(sorted(available)))
+        if configured not in models:
+            raise RuntimeError(f'Configured model {configured} not listed. Available: {", ".join(sorted(models))}')
+        return [models[configured]]
+    selected = [models[name] for name in PREFERRED if name in models]
+    selected += [full for name, full in sorted(models.items())
+                 if name not in PREFERRED and 'flash' in name and 'preview' not in name]
+    if not selected:
+        raise RuntimeError('No suitable Flash model listed: ' + ', '.join(sorted(models)))
+    return selected
 
 
 def generate(history):
@@ -65,48 +71,63 @@ def generate(history):
     if not key:
         raise RuntimeError('GEMINI_API_KEY is empty')
     now = dt.datetime.now(ZoneInfo('Europe/Moscow'))
-    recent = [x.get('title', '') for x in history[-30:]]
-    prompt = f'''Ты редактор INSIGHT — интеллектуальных микроэссе для Apple Watch. Сейчас {now:%Y-%m-%d %H:%M} по Москве.
-Создай ОДНУ неожиданную, интеллектуально честную идею на русском. Чередуй темы: экономика, теория игр, психология, физика/космос, ИИ/технологии, сложные системы. Избегай банальных цитат, мистики, недостоверных фактов и категоричных заявлений о спорных гипотезах.
-Не повторяй эти недавние заголовки: {json.dumps(recent, ensure_ascii=False)}.
-Верни ТОЛЬКО JSON объект со строковыми ключами:
-"title" — заголовок до 42 символов;
-"line1" — интригующий тезис до 32 символов;
-"line2" — неожиданный вывод до 32 символов;
-"paradox" — суть парадокса, 1-2 предложения;
-"evidence" — объяснение механизма и известный научный принцип/эффект, 2-4 предложения, без выдуманных ссылок;
-"application" — практический пример, 2-3 предложения;
-"experiment" — мысленный эксперимент или вопрос, 1-2 предложения;
-"topic" — название темы.
-Заголовок и строки должны быть понятны без контекста. Все значения — текст, не массивы.'''
-    model = choose_model(key)
-    print(f'Using Gemini model: {model}', flush=True)
-    payload = {'contents': [{'parts': [{'text': prompt}]}], 'generationConfig': {'temperature': 0.9, 'responseMimeType': 'application/json'}}
-    response = api_request('/' + model + ':generateContent', key, payload)
-    candidates = response.get('candidates') or []
-    if not candidates:
-        raise RuntimeError('Gemini returned no candidates: ' + json.dumps(response, ensure_ascii=False)[:1000])
-    raw = ''.join(p.get('text', '') for p in candidates[0].get('content', {}).get('parts', []))
-    idea = json.loads(raw)
-    if not isinstance(idea, dict) or any(not isinstance(idea.get(k), str) or not idea[k].strip() for k in REQUIRED):
-        raise ValueError('Gemini returned incomplete INSIGHT data')
-    for k, limit in (('title', 42), ('line1', 32), ('line2', 32)):
-        if len(idea[k]) > limit:
-            raise ValueError(f'{k} is too long ({len(idea[k])} > {limit})')
-    if idea['title'].casefold() in {x.casefold() for x in recent}:
-        raise ValueError('Duplicate title')
-    return idea, now
+    recent = [item.get('title', '') for item in history[-30:]]
+    topics = ('ÑÐºÐ¾Ð½Ð¾Ð¼Ð¸ÐºÐ°', 'ÑÐµÐ¾ÑÐ¸Ñ Ð¸Ð³Ñ', 'Ð¿ÑÐ¸ÑÐ¾Ð»Ð¾Ð³Ð¸Ñ', 'ÑÐ¸Ð·Ð¸ÐºÐ° Ð¸ ÐºÐ¾ÑÐ¼Ð¾Ñ',
+              'Ð¸ÑÐºÑÑÑÑÐ²ÐµÐ½Ð½ÑÐ¹ Ð¸Ð½ÑÐµÐ»Ð»ÐµÐºÑ', 'ÑÐ»Ð¾Ð¶Ð½ÑÐµ ÑÐ¸ÑÑÐµÐ¼Ñ')
+    topic = topics[len(history) % len(topics)]
+    prompt = f'''Ð¢Ñ ÑÐµÐ´Ð°ÐºÑÐ¾Ñ INSIGHT â Ð¸Ð½ÑÐµÐ»Ð»ÐµÐºÑÑÐ°Ð»ÑÐ½ÑÑ Ð¼Ð¸ÐºÑÐ¾ÑÑÑÐµ Ð´Ð»Ñ Apple Watch. Ð¡ÐµÐ¹ÑÐ°Ñ {now:%Y-%m-%d %H:%M} Ð¿Ð¾ ÐÐ¾ÑÐºÐ²Ðµ.
+Ð¢ÐµÐ¼Ð° ÑÑÐ¾Ð³Ð¾ Ð²ÑÐ¿ÑÑÐºÐ°: {topic}. Ð¡Ð¾Ð·Ð´Ð°Ð¹ ÐÐÐÐ£ Ð½ÐµÐ¾Ð¶Ð¸Ð´Ð°Ð½Ð½ÑÑ, Ð¸Ð½ÑÐµÐ»Ð»ÐµÐºÑÑÐ°Ð»ÑÐ½Ð¾ ÑÐµÑÑÐ½ÑÑ Ð¸Ð´ÐµÑ Ð½Ð° ÑÑÑÑÐºÐ¾Ð¼. ÐÐ·Ð±ÐµÐ³Ð°Ð¹ Ð±Ð°Ð½Ð°Ð»ÑÐ½ÑÑ ÑÐ¸ÑÐ°Ñ, Ð¼Ð¸ÑÑÐ¸ÐºÐ¸, Ð½ÐµÐ´Ð¾ÑÑÐ¾Ð²ÐµÑÐ½ÑÑ ÑÐ°ÐºÑÐ¾Ð² Ð¸ ÐºÐ°ÑÐµÐ³Ð¾ÑÐ¸ÑÐ½ÑÑ Ð·Ð°ÑÐ²Ð»ÐµÐ½Ð¸Ð¹ Ð¾ ÑÐ¿Ð¾ÑÐ½ÑÑ Ð³Ð¸Ð¿Ð¾ÑÐµÐ·Ð°Ñ.
+ÐÐµ Ð¿Ð¾Ð²ÑÐ¾ÑÑÐ¹ ÑÑÐ¸ Ð·Ð°Ð³Ð¾Ð»Ð¾Ð²ÐºÐ¸: {json.dumps(recent, ensure_ascii=False)}.
+ÐÐµÑÐ½Ð¸ Ð¢ÐÐÐ¬ÐÐ JSON Ð¾Ð±ÑÐµÐºÑ ÑÐ¾ ÑÑÑÐ¾ÐºÐ¾Ð²ÑÐ¼Ð¸ ÐºÐ»ÑÑÐ°Ð¼Ð¸:
+"title" â Ð·Ð°Ð³Ð¾Ð»Ð¾Ð²Ð¾Ðº Ð´Ð¾ 42 ÑÐ¸Ð¼Ð²Ð¾Ð»Ð¾Ð²;
+"line1" â Ð¸Ð½ÑÑÐ¸Ð³ÑÑÑÐ¸Ð¹ ÑÐµÐ·Ð¸Ñ Ð´Ð¾ 32 ÑÐ¸Ð¼Ð²Ð¾Ð»Ð¾Ð²;
+"line2" â Ð½ÐµÐ¾Ð¶Ð¸Ð´Ð°Ð½Ð½ÑÐ¹ Ð²ÑÐ²Ð¾Ð´ Ð´Ð¾ 32 ÑÐ¸Ð¼Ð²Ð¾Ð»Ð¾Ð²;
+"paradox" â ÑÑÑÑ Ð¿Ð°ÑÐ°Ð´Ð¾ÐºÑÐ°, 1-2 Ð¿ÑÐµÐ´Ð»Ð¾Ð¶ÐµÐ½Ð¸Ñ;
+"evidence" â Ð¾Ð±ÑÑÑÐ½ÐµÐ½Ð¸Ðµ Ð¼ÐµÑÐ°Ð½Ð¸Ð·Ð¼Ð° Ð¸ Ð¸Ð·Ð²ÐµÑÑÐ½ÑÐ¹ Ð½Ð°ÑÑÐ½ÑÐ¹ Ð¿ÑÐ¸Ð½ÑÐ¸Ð¿/ÑÑÑÐµÐºÑ, 2-4 Ð¿ÑÐµÐ´Ð»Ð¾Ð¶ÐµÐ½Ð¸Ñ, Ð±ÐµÐ· Ð²ÑÐ´ÑÐ¼Ð°Ð½Ð½ÑÑ ÑÑÑÐ»Ð¾Ðº;
+"application" â Ð¿ÑÐ°ÐºÑÐ¸ÑÐµÑÐºÐ¸Ð¹ Ð¿ÑÐ¸Ð¼ÐµÑ, 2-3 Ð¿ÑÐµÐ´Ð»Ð¾Ð¶ÐµÐ½Ð¸Ñ;
+"experiment" â Ð¼ÑÑÐ»ÐµÐ½Ð½ÑÐ¹ ÑÐºÑÐ¿ÐµÑÐ¸Ð¼ÐµÐ½Ñ Ð¸Ð»Ð¸ Ð²Ð¾Ð¿ÑÐ¾Ñ, 1-2 Ð¿ÑÐµÐ´Ð»Ð¾Ð¶ÐµÐ½Ð¸Ñ;
+"topic" â Ð½Ð°Ð·Ð²Ð°Ð½Ð¸Ðµ ÑÐµÐ¼Ñ.
+ÐÑÐµ Ð·Ð½Ð°ÑÐµÐ½Ð¸Ñ â ÑÑÑÐ¾ÐºÐ¸. ÐÐ°Ð³Ð¾Ð»Ð¾Ð²Ð¾Ðº Ð¸ ÐºÐ¾ÑÐ¾ÑÐºÐ¸Ðµ ÑÑÑÐ¾ÐºÐ¸ Ð¿Ð¾Ð½ÑÑÐ½Ñ Ð±ÐµÐ· ÐºÐ¾Ð½ÑÐµÐºÑÑÐ°.'''
+    payload = {'contents': [{'parts': [{'text': prompt}]}],
+               'generationConfig': {'temperature': 0.85, 'responseMimeType': 'application/json'}}
+    errors = []
+    for model in model_candidates(key):
+        print(f'Trying Gemini model: {model}', flush=True)
+        try:
+            result = api_request('/' + model + ':generateContent', key, payload)
+        except RuntimeError as exc:
+            msg = str(exc)
+            # Only move to a different model for missing/deprecated models or exhausted quota.
+            if any(f'HTTP {code}' in msg for code in (404, 429)):
+                errors.append(f'{model}: {msg[:450]}')
+                continue
+            raise
+        candidates = result.get('candidates') or []
+        if not candidates:
+            raise RuntimeError('Gemini returned no candidates: ' + json.dumps(result, ensure_ascii=False)[:1000])
+        raw = ''.join(part.get('text', '') for part in candidates[0].get('content', {}).get('parts', []))
+        idea = json.loads(raw)
+        if not isinstance(idea, dict) or any(not isinstance(idea.get(k), str) or not idea[k].strip() for k in REQUIRED):
+            raise ValueError('Gemini returned incomplete INSIGHT data')
+        for field, limit in (('title', 42), ('line1', 32), ('line2', 32)):
+            if len(idea[field]) > limit:
+                raise ValueError(f'{field} is too long ({len(idea[field])} > {limit})')
+        if idea['title'].casefold() in {x.casefold() for x in recent}:
+            raise ValueError('Duplicate title')
+        print(f'Using Gemini model: {model}', flush=True)
+        return idea, now
+    raise RuntimeError('All candidate models failed: ' + ' | '.join(errors))
 
 
 def build(idea, now):
     base = json.loads(LATEST.read_text(encoding='utf-8'))
     if not base.get('families') or not base.get('views'):
         raise ValueError('Existing latest.json is not a valid Complicated configuration')
-    header = f'INSIGHT · {now:%d.%m %H:%M}'
-    body = (f"{idea['title']}\n\nПарадокс\n{idea['paradox']}\n\n"
-            f"Почему это работает\n{idea['evidence']}\n\n"
-            f"Применение\n{idea['application']}\n\n"
-            f"Мысленный эксперимент\n{idea['experiment']}")
+    header = f'INSIGHT Â· {now:%d.%m %H:%M}'
+    body = (f"{idea['title']}\n\nÐÐ°ÑÐ°Ð´Ð¾ÐºÑ\n{idea['paradox']}\n\n"
+            f"ÐÐ¾ÑÐµÐ¼Ñ ÑÑÐ¾ ÑÐ°Ð±Ð¾ÑÐ°ÐµÑ\n{idea['evidence']}\n\n"
+            f"ÐÑÐ¸Ð¼ÐµÐ½ÐµÐ½Ð¸Ðµ\n{idea['application']}\n\n"
+            f"ÐÑÑÐ»ÐµÐ½Ð½ÑÐ¹ ÑÐºÑÐ¿ÐµÑÐ¸Ð¼ÐµÐ½Ñ\n{idea['experiment']}")
     base['name'] = 'INSIGHT'
     base['showOnLockScreen'] = True
     base['views'] = [{'type': 'text', 'body': body}]
