@@ -4,9 +4,9 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
-import random
 import sys
 import time
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,10 +17,12 @@ LATEST = ROOT / 'latest.json'
 ARCHIVE = ROOT / 'archive'
 API = 'https://generativelanguage.googleapis.com/v1beta'
 REQUIRED = ('title', 'line1', 'line2', 'paradox', 'evidence', 'application', 'experiment', 'topic')
-PREFERRED = ('gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash-lite')
+PREFERRED = ('gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.5-flash', 'gemini-2.5-flash-lite')
+REQUEST_TIMEOUT = 35
+MAX_ATTEMPTS_PER_MODEL = 2
 
 
-def api_request(path, key, payload=None):
+def api_request(path, key, payload=None, timeout=REQUEST_TIMEOUT):
     headers = {'x-goog-api-key': key, 'Accept': 'application/json'}
     data = None
     if payload is not None:
@@ -29,7 +31,7 @@ def api_request(path, key, payload=None):
     request = urllib.request.Request(API + path, data=data, headers=headers,
                                      method='POST' if data is not None else 'GET')
     try:
-        with urllib.request.urlopen(request, timeout=90) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         details = exc.read().decode('utf-8', errors='replace')[:1500]
@@ -94,14 +96,23 @@ def generate(history):
     for model in model_candidates(key):
         print(f'Trying Gemini model: {model}', flush=True)
         try:
-            result = api_request('/' + model + ':generateContent', key, payload)
-        except RuntimeError as exc:
+            result = None
+            for attempt in range(1, MAX_ATTEMPTS_PER_MODEL + 1):
+                try:
+                    result = api_request('/' + model + ':generateContent', key, payload)
+                    break
+                except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+                    print(f'Temporary network error on {model}, attempt {attempt}: {exc}', flush=True)
+                    if attempt == MAX_ATTEMPTS_PER_MODEL:
+                        raise
+                    time.sleep(2)
+            if result is None:
+                raise RuntimeError('No API response')
+        except (RuntimeError, TimeoutError, socket.timeout, urllib.error.URLError) as exc:
             msg = str(exc)
-            # Only move to a different model for missing/deprecated models or exhausted quota.
-            if any(f'HTTP {code}' in msg for code in (404, 429)):
-                errors.append(f'{model}: {msg[:450]}')
-                continue
-            raise
+            errors.append(f'{model}: {msg[:450]}')
+            print(f'Model failed: {model}: {msg[:450]}', flush=True)
+            continue
         candidates = result.get('candidates') or []
         if not candidates:
             raise RuntimeError('Gemini returned no candidates: ' + json.dumps(result, ensure_ascii=False)[:1000])
