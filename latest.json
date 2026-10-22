@@ -1,8 +1,60 @@
 {
-  "project": "INSIGHT",
-  "date": "2026-10-22",
-  "category": "Экономика и теория игр",
-  "title": "Почему рациональные решения приводят к общему проигрышу?",
-  "summary": "Личная выгода не всегда создаёт общий оптимум.",
-  "url": "https://example.com/insight"
+  "name": "INSIGHT",
+  "showOnLockScreen": true,
+  "views": [
+    {
+      "type": "text",
+      "body": "INSIGHT · 22 октября 2026\n\nПарадокс дня: чем точнее прогноз, тем опаснее считать его неизменным.\n\nКогда люди узнают прогноз, они меняют поведение. Поэтому сам прогноз способен изменить исход, который пытался предсказать.\n\nПример: прогноз дефицита вызывает ажиотажный спрос — и тем самым усиливает дефицит. Прогноз пробок заставляет водителей сменить маршрут — и меняет распределение пробок.\n\nПрактика: в бизнес-плане разделяй базовый сценарий и реакцию участников на публикацию прогноза.\n\nМысленный эксперимент: что произойдёт с твоим прогнозом, если завтра все участники рынка начнут ему верить?"
+    }
+  ],
+  "families": [
+    {
+      "family": "graphicRectangular",
+      "class": "CLKComplicationTemplateGraphicRectangularStandardBody",
+      "header": "INSIGHT · 22 ОКТ",
+      "body1": "Прогноз меняет поведение",
+      "body2": "А значит — и результат"
+    },
+    {
+      "family": "modularLarge",
+      "class": "CLKComplicationTemplateModularLargeStandardBody",
+      "header": "INSIGHT · 22 ОКТ",
+      "body1": "Прогноз меняет поведение",
+      "body2": "А значит — и результат"
+    },
+    {
+      "family": "graphicCircular",
+      "class": "CLKComplicationTemplateGraphicCircularStackText",
+      "line1": "INSIGHT",
+      "line2": "22 ОКТ"
+    },
+    {
+      "family": "circularSmall",
+      "class": "CLKComplicationTemplateCircularSmallStackText",
+      "line1": "INSIGHT",
+      "line2": "22 ОКТ"
+    },
+    {
+      "family": "modularSmall",
+      "class": "CLKComplicationTemplateModularSmallStackText",
+      "line1": "INSIGHT",
+      "line2": "22 ОКТ"
+    },
+    {
+      "family": "graphicCorner",
+      "class": "CLKComplicationTemplateGraphicCornerStackText",
+      "innerText": "INSIGHT",
+      "outerText": "22 ОКТ"
+    },
+    {
+      "family": "utilitarianSmall",
+      "class": "CLKComplicationTemplateUtilitarianSmallFlat",
+      "text": "INSIGHT"
+    },
+    {
+      "family": "utilitarianLarge",
+      "class": "CLKComplicationTemplateUtilitarianLargeFlat",
+      "text": "INSIGHT · Прогноз меняет исход"
+    }
+  ]
 }
